@@ -1,0 +1,971 @@
+// ============================================================
+// PLATAFORMA DE INTELIGÊNCIA CLÍNICA E SAÚDE POPULACIONAL
+// Schema Canônico de Dados em Saúde
+// ============================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// MÓDULO: AUTENTICAÇÃO E GOVERNANÇA
+// ============================================================
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  name          String?
+  passwordHash  String?
+  role          UserRole @default(PATIENT)
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations
+  patient       Patient?
+  auditLogs     AuditEvent[]
+  sessions      PreConsultationSession[]
+
+  @@map("users")
+}
+
+enum UserRole {
+  PATIENT
+  PHYSICIAN
+  NURSE
+  HEALTH_MANAGER
+  ADMIN
+}
+
+model AuditEvent {
+  id          String   @id @default(cuid())
+  userId      String?
+  action      String
+  entityType  String
+  entityId    String?
+  details     String?  // JSON string
+  ipAddress   String?
+  userAgent   String?
+  createdAt   DateTime @default(now())
+
+  user        User?    @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@map("audit_events")
+}
+
+// ============================================================
+// MÓDULO A: AGENTE CLÍNICO - ENTIDADES PRINCIPAIS
+// ============================================================
+
+model Patient {
+  id                    String   @id @default(cuid())
+  userId                String   @unique
+  cpf                   String?  @unique // Pseudonymized in production
+  name                  String
+  birthDate             DateTime
+  sex                   String?  // M, F, Other
+  genderIdentity        String?
+  race                  String?
+  ethnicity             String?
+  phone                 String?
+  addressZipCode        String?
+  addressCity           String?
+  addressState          String?
+  emergencyContact      String?
+  emergencyPhone        String?
+  bloodType             String?
+  organDonor            Boolean  @default(false)
+  active                Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  user                  User     @relation(fields: [userId], references: [id])
+  encounters            Encounter[]
+  preConsultations      PreConsultationSession[]
+  conditions            ConditionHistory[]
+  allergies             Allergy[]
+  medications           Medication[]
+  observations          Observation[]
+  labResults            LabResult[]
+  vitalSigns            VitalSign[]
+  timelineEvents        ClinicalTimelineEvent[]
+  triageAssessments     TriageAssessment[]
+  consents              ConsentRecord[]
+
+  @@map("patients")
+}
+
+model Encounter {
+  id                String          @id @default(cuid())
+  patientId         String
+  type              EncounterType
+  status            EncounterStatus @default(PLANNED)
+  priority          Priority        @default(ROUTINE)
+  reason            String?
+  scheduledAt       DateTime?
+  startedAt         DateTime?
+  endedAt           DateTime?
+  facilityId        String?
+  physicianId       String?
+  notes             String?
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  patient           Patient         @relation(fields: [patientId], references: [id])
+  preConsultations  PreConsultationSession[]
+
+  @@index([patientId])
+  @@index([status])
+  @@map("encounters")
+}
+
+enum EncounterType {
+  OUTPATIENT
+  INPATIENT
+  EMERGENCY
+  HOME_VISIT
+  TELECONSULTATION
+  PREVENTIVE
+}
+
+enum EncounterStatus {
+  PLANNED
+  ARRIVED
+  IN_PROGRESS
+  FINISHED
+  CANCELLED
+}
+
+enum Priority {
+  IMMEDIATE
+  URGENT
+  HIGH
+  MODERATE
+  ROUTINE
+  LOW
+}
+
+// ============================================================
+// PRÉ-CONSULTA E TRIAGEM
+// ============================================================
+
+model PreConsultationSession {
+  id                String                @id @default(cuid())
+  patientId         String
+  encounterId       String?
+  userId            String                // Who initiated (patient or staff)
+  status            SessionStatus         @default(ACTIVE)
+  primaryComplaint  String?
+  startedAt         DateTime              @default(now())
+  completedAt       DateTime?
+  aiModelVersion    String?
+  createdAt         DateTime              @default(now())
+  updatedAt         DateTime              @updatedAt
+
+  patient           Patient               @relation(fields: [patientId], references: [id])
+  encounter         Encounter?            @relation(fields: [encounterId], references: [id])
+  user              User                  @relation(fields: [userId], references: [id])
+  symptomReports    SymptomReport[]
+  chatMessages      ChatMessage[]
+  triageAssessment  TriageAssessment?
+  clinicalSummary   ClinicalSummary?
+  physicianReview   PhysicianReview?
+
+  @@index([patientId])
+  @@index([status])
+  @@map("preconsultation_sessions")
+}
+
+enum SessionStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+  ESCALATED
+}
+
+model SymptomReport {
+  id                    String                  @id @default(cuid())
+  sessionId             String
+  symptomName           String
+  bodySite              String?
+  onsetDate             DateTime?
+  onsetDuration         String?                 // e.g., "3 days", "2 hours"
+  durationUnit          String?
+  severity              Int?                    // 1-10 scale
+  severityDescription   String?                 // mild, moderate, severe
+  character             String?                 // sharp, dull, burning, etc.
+  radiation             String?
+  aggravatingFactors    String?                 // JSON array
+  relievingFactors      String?                 // JSON array
+  associatedSymptoms    String?                 // JSON array
+  progression           String?                 // improving, worsening, stable
+  impactOnDailyLife     String?
+  temporalPattern       String?                 // constant, intermittent
+  context               String?                 // what patient was doing
+  severityScore         Float?                  // Calculated AI score
+  extractedAt           DateTime                @default(now())
+  createdAt             DateTime                @default(now())
+
+  session               PreConsultationSession  @relation(fields: [sessionId], references: [id])
+
+  @@index([sessionId])
+  @@map("symptom_reports")
+}
+
+model ChatMessage {
+  id              String                @id @default(cuid())
+  sessionId       String
+  role            MessageRole
+  content         String
+  contentType     String                @default("text")
+  metadata        String?               // JSON for structured data
+  sentiment       String?
+  intent          String?
+  confidence      Float?
+  processingMs    Int?
+  createdAt       DateTime              @default(now())
+
+  session         PreConsultationSession @relation(fields: [sessionId], references: [id])
+
+  @@index([sessionId])
+  @@map("chat_messages")
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+  SYSTEM
+}
+
+// ============================================================
+// HISTÓRICO CLÍNICO
+// ============================================================
+
+model ConditionHistory {
+  id              String    @id @default(cuid())
+  patientId       String
+  conditionCode   String?   // ICD-10 or similar
+  conditionName   String
+  status          ConditionStatus
+  onsetDate       DateTime?
+  resolutionDate  DateTime?
+  verified        Boolean   @default(false)
+  source          String?   // patient_reported, clinical_record, etc.
+  notes           String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  patient         Patient   @relation(fields: [patientId], references: [id])
+
+  @@index([patientId])
+  @@index([conditionCode])
+  @@map("condition_history")
+}
+
+enum ConditionStatus {
+  ACTIVE
+  RESOLVED
+  REMISSION
+  CHRONIC
+  SUSPECTED
+}
+
+model Allergy {
+  id              String        @id @default(cuid())
+  patientId       String
+  substance       String
+  substanceCode   String?       // RxNorm or similar
+  reaction        String?
+  severity        AllergySeverity?
+  status          AllergyStatus @default(ACTIVE)
+  verified        Boolean       @default(false)
+  source          String?
+  notes           String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  patient         Patient       @relation(fields: [patientId], references: [id])
+
+  @@index([patientId])
+  @@map("allergies")
+}
+
+enum AllergySeverity {
+  MILD
+  MODERATE
+  SEVERE
+  LIFE_THREATENING
+}
+
+enum AllergyStatus {
+  ACTIVE
+  INACTIVE
+  RESOLVED
+  DISPUTED
+}
+
+model Medication {
+  id                String            @id @default(cuid())
+  patientId         String
+  medicationName    String
+  medicationCode    String?
+  dosage            String?
+  frequency         String?
+  route             String?
+  startDate         DateTime?
+  endDate           DateTime?
+  prescriber        String?
+  indication        String?
+  status            MedicationStatus  @default(ACTIVE)
+  adherence         String?
+  source            String?
+  notes             String?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  patient           Patient           @relation(fields: [patientId], references: [id])
+
+  @@index([patientId])
+  @@map("medications")
+}
+
+enum MedicationStatus {
+  ACTIVE
+  DISCONTINUED
+  ON_HOLD
+  COMPLETED
+}
+
+model Observation {
+  id              String    @id @default(cuid())
+  patientId       String
+  encounterId     String?
+  observationType String
+  code            String?   // LOINC code
+  codeSystem      String?
+  value           String
+  valueType       String?   // quantity, string, boolean, etc.
+  unit            String?
+  referenceRange  String?
+  interpretation  String?
+  method          String?
+  effectiveDate   DateTime
+  issuedDate      DateTime?
+  performer       String?
+  status          String?   @default("final")
+  notes           String?
+  createdAt       DateTime  @default(now())
+
+  patient         Patient   @relation(fields: [patientId], references: [id])
+
+  @@index([patientId])
+  @@index([observationType])
+  @@map("observations")
+}
+
+model LabResult {
+  id                String    @id @default(cuid())
+  patientId         String
+  encounterId       String?
+  testName          String
+  testCode          String?   // LOINC
+  testCategory      String?
+  specimenType      String?
+  collectionDate    DateTime?
+  resultDate        DateTime?
+  resultValue       String?
+  resultUnit        String?
+  referenceRange    String?
+  interpretation    String?   // normal, high, low, critical
+  flag              String?
+  performer         String?
+  reportUrl         String?
+  status            String?   @default("final")
+  notes             String?
+  createdAt         DateTime  @default(now())
+
+  patient           Patient   @relation(fields: [patientId], references: [id])
+
+  @@index([patientId])
+  @@index([testCode])
+  @@map("lab_results")
+}
+
+model VitalSign {
+  id              String    @id @default(cuid())
+  patientId       String
+  encounterId     String?
+  vitalType       String    // blood_pressure, heart_rate, temperature, etc.
+  value           Float
+  unit            String
+  systolic        Float?    // For blood pressure
+  diastolic       Float?    // For blood pressure
+  position        String?   // sitting, standing, supine
+  measurementSite String?
+  method          String?   // manual, automatic
+  effectiveDate   DateTime
+  notes           String?
+  createdAt       DateTime  @default(now())
+
+  patient         Patient   @relation(fields: [patientId], references: [id])
+
+  @@index([patientId])
+  @@index([vitalType])
+  @@map("vital_signs")
+}
+
+model ClinicalTimelineEvent {
+  id              String            @id @default(cuid())
+  patientId       String
+  eventType       TimelineEventType
+  title           String
+  description     String?
+  eventDate       DateTime
+  source          String?
+  sourceId        String?
+  significance    String?           // high, medium, low
+  category        String?
+  metadata        String?           // JSON
+  createdAt       DateTime          @default(now())
+
+  patient         Patient           @relation(fields: [patientId], references: [id])
+
+  @@index([patientId])
+  @@index([eventDate])
+  @@map("clinical_timeline_events")
+}
+
+enum TimelineEventType {
+  SYMPTOM_ONSET
+  DIAGNOSIS
+  PROCEDURE
+  HOSPITALIZATION
+  MEDICATION_START
+  MEDICATION_STOP
+  LAB_RESULT
+  ALLERGY_DISCOVERED
+  VACCINATION
+  CONSULTATION
+  SURGERY
+  EMERGENCY_VISIT
+  LIFESTYLE_CHANGE
+  OTHER
+}
+
+// ============================================================
+// TRIAGEM E AVALIAÇÃO
+// ============================================================
+
+model TriageAssessment {
+  id                      String                @id @default(cuid())
+  patientId               String
+  sessionId               String                @unique
+  priority                Priority
+  priorityRationale       String?
+  urgencyScore            Float?
+  urgencyLevel            String?
+  redFlags                String?               // JSON array
+  redFlagCount            Int                   @default(0)
+  riskFactors             String?               // JSON array
+  protectiveFactors       String?               // JSON array
+  dataCompleteness        Float?                // % of expected data collected
+  confidenceScore         Float?                // AI confidence in assessment
+  limitations             String?               // JSON array
+  recommendedAction       String?
+  estimatedUrgency        String?
+  clinicalReasoning       String?               // AI explanation
+  modelVersion            String?
+  assessedAt              DateTime              @default(now())
+  createdAt               DateTime              @default(now())
+
+  patient                 Patient               @relation(fields: [patientId], references: [id])
+  session                 PreConsultationSession @relation(fields: [sessionId], references: [id])
+
+  @@index([patientId])
+  @@index([priority])
+  @@map("triage_assessments")
+}
+
+model ClinicalSummary {
+  id                      String                  @id @default(cuid())
+  sessionId               String                  @unique
+  patientId               String
+  chiefComplaint          String
+  historyPresentIllness   String
+  relevantHistory         String?
+  currentMedications      String?                 // JSON array
+  allergiesSummary        String?
+  vitalSignsSummary       String?
+  relevantLabResults      String?
+  riskFactorsSummary      String?
+  dataGaps                String?                 // JSON array
+  inconsistencies         String?                 // JSON array
+  pendingExams            String?                 // JSON array
+  alertFlags              String?                 // JSON array
+  triagePriority          Priority
+  clinicalNotes           String?
+  summaryForPhysician     String?
+  generatedAt             DateTime                @default(now())
+  createdAt               DateTime                @default(now())
+
+  session                 PreConsultationSession  @relation(fields: [sessionId], references: [id])
+  hypotheses              DifferentialHypothesis[]
+
+  @@index([patientId])
+  @@map("clinical_summaries")
+}
+
+model DifferentialHypothesis {
+  id                    String            @id @default(cuid())
+  summaryId             String
+  hypothesisName        String
+  icdCode               String?
+  probability           Float?            // 0-1
+  confidenceLevel       String?           // high, medium, low
+  supportingEvidence    String?           // JSON array
+  contradictingEvidence String?           // JSON array
+  missingData           String?           // JSON array
+  suggestedWorkup       String?           // JSON array
+  urgency               String?
+  notes                 String?
+  rankOrder             Int?
+  createdAt             DateTime          @default(now())
+
+  summary               ClinicalSummary   @relation(fields: [summaryId], references: [id])
+
+  @@index([summaryId])
+  @@map("differential_hypotheses")
+}
+
+model AlertFlag {
+  id              String      @id @default(cuid())
+  patientId       String
+  sessionId       String?
+  alertType       AlertType
+  severity        AlertSeverity
+  title           String
+  description     String
+  sourceData      String?     // JSON
+  triggeredBy     String?     // rule, ai, manual
+  acknowledged    Boolean     @default(false)
+  acknowledgedBy  String?
+  acknowledgedAt  DateTime?
+  resolvedAt      DateTime?
+  createdAt       DateTime    @default(now())
+
+  @@index([patientId])
+  @@index([alertType])
+  @@map("alert_flags")
+}
+
+enum AlertType {
+  RED_FLAG_SYMPTOM
+  CRITICAL_LAB_RESULT
+  DRUG_INTERACTION
+  MISSED_APPOINTMENT
+  OVERDUE_SCREENING
+  VACCINE_DUE
+  CHRONIC_CONDITION_ALERT
+  TREND_ANOMALY
+  DATA_QUALITY
+  OTHER
+}
+
+enum AlertSeverity {
+  CRITICAL
+  HIGH
+  MODERATE
+  LOW
+  INFO
+}
+
+// ============================================================
+// MÓDULO B: SAÚDE POPULACIONAL - ENTIDADES
+// ============================================================
+
+model HealthRegion {
+  id              String    @id @default(cuid())
+  code            String    @unique  // IBGE code or similar
+  name            String
+  state           String
+  macroRegion     String?
+  population      Int?
+  areaKm2         Float?
+  latitude        Float?
+  longitude       Float?
+  active          Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  municipalities  Municipality[]
+  facilities      Facility[]
+  indicators      PopulationIndicator[]
+  riskProfiles    RiskProfile[]
+  recommendations Recommendation[]
+
+  @@map("health_regions")
+}
+
+model Municipality {
+  id              String        @id @default(cuid())
+  code            String        @unique  // IBGE code
+  name            String
+  state           String
+  regionId        String
+  population      Int?
+  urbanPopulation Int?
+  ruralPopulation Int?
+  areaKm2         Float?
+  latitude        Float?
+  longitude       Float?
+  active          Boolean       @default(true)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  region          HealthRegion  @relation(fields: [regionId], references: [id])
+  facilities      Facility[]
+  indicators      PopulationIndicator[]
+  riskProfiles    RiskProfile[]
+
+  @@index([regionId])
+  @@map("municipalities")
+}
+
+model Facility {
+  id              String        @id @default(cuid())
+  cnes            String?       @unique  // CNES code
+  name            String
+  facilityType    String        // UBS, UPA, Hospital, etc.
+  regionId        String
+  municipalityId  String
+  address         String?
+  latitude        Float?
+  longitude       Float?
+  beds            Int?
+  icuBeds         Int?
+  active          Boolean       @default(true)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  region          HealthRegion  @relation(fields: [regionId], references: [id])
+  municipality    Municipality  @relation(fields: [municipalityId], references: [id])
+
+  @@index([regionId])
+  @@index([municipalityId])
+  @@map("facilities")
+}
+
+model PopulationIndicator {
+  id                  String        @id @default(cuid())
+  regionId            String?
+  municipalityId      String?
+  indicatorCode       String
+  indicatorName       String
+  category            String        // morbidity, mortality, coverage, etc.
+  value               Float
+  unit                String?
+  period              String        // YYYY, YYYY-MM, etc.
+  periodStart         DateTime?
+  periodEnd           DateTime?
+  dataSource          String?
+  dataQuality         Float?        // 0-1
+  notes               String?
+  createdAt           DateTime      @default(now())
+
+  region              HealthRegion? @relation(fields: [regionId], references: [id])
+  municipality        Municipality? @relation(fields: [municipalityId], references: [id])
+
+  @@index([regionId])
+  @@index([municipalityId])
+  @@index([indicatorCode])
+  @@index([period])
+  @@map("population_indicators")
+}
+
+model RiskProfile {
+  id                  String        @id @default(cuid())
+  regionId            String?
+  municipalityId      String?
+  profileDate         DateTime
+  riskScore           Float         // 0-1 or 0-100
+  riskLevel           RiskLevel
+  category            String        // cardiometabolic, respiratory, mental_health, etc.
+  contributingFactors String?       // JSON array
+  trendDirection      String?       // increasing, decreasing, stable
+  trendMagnitude      Float?
+  predictionHorizon   Int?          // months
+  predictionValue     Float?
+  confidenceInterval  String?
+  modelVersion        String?
+  modelConfidence     Float?
+  notes               String?
+  createdAt           DateTime      @default(now())
+
+  region              HealthRegion? @relation(fields: [regionId], references: [id])
+  municipality        Municipality? @relation(fields: [municipalityId], references: [id])
+
+  @@index([regionId])
+  @@index([municipalityId])
+  @@index([category])
+  @@map("risk_profiles")
+}
+
+enum RiskLevel {
+  VERY_LOW
+  LOW
+  MODERATE
+  HIGH
+  VERY_HIGH
+  CRITICAL
+}
+
+model Recommendation {
+  id              String        @id @default(cuid())
+  regionId        String
+  recommendationType String
+  title           String
+  description     String
+  rationale       String?
+  targetIndicator String?
+  expectedImpact  String?
+  confidenceLevel Float?
+  priority        Int?
+  status          RecommendationStatus @default(PENDING)
+  assignedTo      String?
+  dueDate         DateTime?
+  completedAt     DateTime?
+  outcome         String?
+  dataSource      String?       // JSON array of indicators used
+  modelVersion    String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  region          HealthRegion  @relation(fields: [regionId], references: [id])
+
+  @@index([regionId])
+  @@index([status])
+  @@map("recommendations")
+}
+
+enum RecommendationStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+  DISMISSED
+  ESCALATED
+}
+
+model DataIngestionJob {
+  id              String            @id @default(cuid())
+  source          String
+  sourceUrl       String?
+  filename        String?
+  status          IngestionStatus
+  recordsTotal    Int?
+  recordsValid    Int?
+  recordsInvalid  Int?
+  errors          String?           // JSON
+  startedAt       DateTime?
+  completedAt     DateTime?
+  durationMs      Int?
+  qualityScore    Float?
+  qualityReport   String?           // JSON
+  createdAt       DateTime          @default(now())
+
+  @@index([source])
+  @@index([status])
+  @@map("data_ingestion_jobs")
+}
+
+enum IngestionStatus {
+  PENDING
+  RUNNING
+  VALIDATING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model DataQualityReport {
+  id                String    @id @default(cuid())
+  jobId             String?
+  dataSource        String
+  metricName        String
+  metricValue       Float
+  threshold         Float?
+  passed            Boolean?
+  details           String?   // JSON
+  reportDate        DateTime  @default(now())
+  createdAt         DateTime  @default(now())
+
+  @@index([dataSource])
+  @@map("data_quality_reports")
+}
+
+model AnomalyDetection {
+  id                String    @id @default(cuid())
+  regionId          String?
+  municipalityId    String?
+  indicatorCode     String
+  detectionDate     DateTime
+  anomalyType       String    // spike, drop, trend_change, outlier
+  expectedValue     Float
+  actualValue       Float
+  deviationScore    Float
+  significance      Float
+  context           String?   // JSON
+  modelVersion      String?
+  acknowledged      Boolean   @default(false)
+  acknowledgedBy    String?
+  acknowledgedAt    DateTime?
+  notes             String?
+  createdAt         DateTime  @default(now())
+
+  @@index([indicatorCode])
+  @@index([detectionDate])
+  @@map("anomaly_detections")
+}
+
+model FeatureStoreSnapshot {
+  id                String    @id @default(cuid())
+  featureSetName    String
+  snapshotDate      DateTime
+  version           String
+  features          String    // JSON
+  statistics        String?   // JSON
+  recordCount       Int?
+  filePath          String?
+  checksum          String?
+  createdAt         DateTime  @default(now())
+
+  @@index([featureSetName])
+  @@index([snapshotDate])
+  @@map("feature_store_snapshots")
+}
+
+// ============================================================
+// AGENT LOGS E VERSIONAMENTO
+// ============================================================
+
+model AgentExecutionLog {
+  id                String    @id @default(cuid())
+  agentType         String
+  sessionId         String?
+  inputHash         String?
+  outputHash        String?
+  modelVersion      String
+  promptVersion     String
+  inputTokens       Int?
+  outputTokens      Int?
+  processingMs      Int?
+  success           Boolean
+  errorMessage      String?
+  outputSchema      String?
+  outputValid       Boolean?
+  createdAt         DateTime  @default(now())
+
+  @@index([agentType])
+  @@index([sessionId])
+  @@map("agent_execution_logs")
+}
+
+model PromptVersion {
+  id                String    @id @default(cuid())
+  promptName        String
+  version           String
+  content           String
+  description       String?
+  inputSchema       String?   // JSON Schema
+  outputSchema      String?   // JSON Schema
+  active            Boolean   @default(true)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@unique([promptName, version])
+  @@map("prompt_versions")
+}
+
+// ============================================================
+// LGPD — CONSENTIMENTO E COMPLIANCE
+// ============================================================
+
+model ConsentRecord {
+  id               String      @id @default(cuid())
+  patientId        String
+  consentType      ConsentType
+  purpose          String
+  legalBasis       LegalBasis
+  granted          Boolean
+  grantedAt        DateTime?
+  revokedAt        DateTime?
+  expiresAt        DateTime?
+  collectionMethod String      @default("digital_form")
+  ipAddress        String?
+  userAgent        String?
+  documentVersion  String
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  patient          Patient     @relation(fields: [patientId], references: [id])
+
+  @@index([patientId])
+  @@index([consentType])
+  @@map("consent_records")
+}
+
+enum ConsentType {
+  PRE_CONSULTATION_AI
+  DATA_PROCESSING
+  SENSITIVE_DATA
+  RESEARCH
+  THIRD_PARTY_SHARE
+}
+
+enum LegalBasis {
+  CONSENT
+  HEALTH_CARE
+  LEGITIMATE_INTEREST
+  LEGAL_OBLIGATION
+}
+
+// ============================================================
+// FEEDBACK LOOP MÉDICO
+// ============================================================
+
+model PhysicianReview {
+  id                  String   @id @default(cuid())
+  sessionId           String   @unique
+  patientId           String
+  physicianId         String
+
+  triageAccepted      Boolean?
+  triageCorrectedTo   String?
+  triageComment       String?
+
+  hypothesesReviewed  Boolean  @default(false)
+  acceptedHypotheses  String?
+  rejectedHypotheses  String?
+  addedDiagnosis      String?
+
+  dataQualityRating   Int?
+  aiUsefulnessRating  Int?
+  comments            String?
+
+  reviewedAt          DateTime @default(now())
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  session             PreConsultationSession @relation(fields: [sessionId], references: [id])
+
+  @@index([patientId])
+  @@index([physicianId])
+  @@map("physician_reviews")
+}
