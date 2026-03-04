@@ -204,8 +204,7 @@ bun run db:generate  # Gerar Prisma Client
 
 ## 📄 Licença
 
-Este é um projeto de demonstração para fins de portfólio.
-
+MIT © [Gabriel B]
 ---
 
 **Desenvolvido com foco em qualidade arquitetural, segurança clínica e usabilidade profissional.**
